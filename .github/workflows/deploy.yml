@@ -1,0 +1,368 @@
+# Simple workflow for deploying static content to GitHub Pages
+name: Deploy main branch as website
+
+on:
+    # Runs on pushes targeting the default branch
+    push:
+        branches: [main]
+
+    # Allows you to run this workflow manually from the Actions tab
+    workflow_dispatch:
+
+# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+permissions:
+    contents: read
+    pages: write
+    id-token: write
+
+# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
+# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
+concurrency:
+    group: "pages"
+    cancel-in-progress: false
+
+jobs:
+    deploy:
+        environment:
+            name: github-pages
+            url: ${{ steps.deployment.outputs.page_url }}
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - uses: actions/setup-python@v5
+              name: Install Python
+              with:
+                  python-version: '3.10'
+            - id: get-repo-values
+              name: Get repository name
+              run: |
+                  url=https://$(echo "${{github.repository}}" | sed "s/\//.github.io\//")
+                  echo "url=$url" >> $GITHUB_OUTPUT
+            # Create the dist/ directory
+            - name: Create dist directory
+              run: |
+                  mkdir -p dist
+            # Create an _ERRORS.txt file and _WARNINGS.txt file to keep track of any errors or warnings that we want to show on the dashboard
+            - name: Create _ERRORS.txt and _WARNINGS.txt
+              run: |
+                  touch ./dist/_ERRORS.txt
+                  touch ./dist/_WARNINGS.txt
+            # Keep track of the build process in a log file that we eventually dump
+            - name: Create Log File
+              id: create_log
+              run: |
+                  echo "Starting Drafter deployment at $(date)" |& tee ./dist/_build_log.txt
+                  echo "Repository: ${{ github.repository }}" |& tee -a ./dist/_build_log.txt
+                  echo "Run ID: ${{ github.run_id }}" |& tee -a ./dist/_build_log.txt
+                  echo "Job: ${{ github.job }}" |& tee -a ./dist/_build_log.txt
+                  echo "Full log available at:" |& tee -a ./dist/_build_log.txt
+                  : # https://stackoverflow.com/a/76681922/1718155
+                  echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" |& tee -a ./dist/_build_log.txt
+                  echo "" >> ./dist/_build_log.txt
+            # Create the dashboard, for quick links and debug information
+            - name: Setup Dashboard
+              id: setup_dashboard
+              run: |
+                  mkdir -p docs
+                  printf '## Quick Links\n\nHere are quick links for your deployed site! The build log is at the bottom.\n\n' > docs/dashboard.md
+
+                  : # Create a redirect to the dashboard from quick/ and dashboard/
+                  echo "<html><head>\
+                  <meta http-equiv='refresh' content='0; URL=docs/dashboard' />\
+                  </head><body>Redirecting to dashboard</body></html>" > ./dist/dashboard.html
+                  cp ./dist/dashboard.html ./dist/quick.html
+
+                  : # Add a link to the deployed site and this dashboard
+                  echo "* [Deployed Site](../): Your actual Drafter website." >> docs/dashboard.md
+                  echo "* [Dashboard](./dashboard.html): This current page." >> docs/dashboard.md
+                  echo "* [Deployment Log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}): The official deployment logs on GitHub, with full details on any deployment issues." >> docs/dashboard.md
+
+                  printf 'Successfully created dashboard file\n' >> ./dist/_build_log.txt
+            # Create redirects to the actual github repository
+            - name: Create Github Repo Redirect and Link
+              id: create_redirects
+              run: |
+                  : # Create a redirect to the github repository
+                  echo "<html><head>\
+                  <meta http-equiv='refresh' content='0; URL=${{github.server_url}}/${{github.repository}}' />\
+                  </head><body>Redirecting to repository</body></html>" > ./dist/repo.html
+
+                  : # Add the redirect to the dashboard
+                  echo "* [GitHub Repository](../repo.html): Jump to the GitHub repository with your source code." >> docs/dashboard.md
+
+                  printf 'Successfully created redirect to repository\n' >> ./dist/_build_log.txt
+            # Copy over readme and check that it has been updated
+            - name: Copy over readme.md
+              id: copy_readme
+              run: |
+                  if [ ! -f readme.md ]; then
+                      echo "Error during build! Missing readme.md in the top-level directory" |& tee -a ./dist/_build_log.txt |& tee "./dist/_ERRORS.txt"
+                      exit 1
+                  fi
+                  cp readme.md docs/index.md
+                  echo "* [Readme](./index.md): Your project's readme file with extra information about your website, the example video, and the planning document." >> docs/dashboard.md
+
+                  : # Check if the readme still has the text "Replace this text with your website name."
+                  if grep -q "Replace this text with your website name." readme.md; then
+                      echo "Error during build! readme.md still has the default text; make sure you update your readme.md" |& tee -a ./dist/_build_log.txt |& tee "./dist/_ERRORS.txt"
+                      exit 1
+                  fi
+
+                  : # Flag a warning if there isn't a link to the video in the file after the "# Video" section
+                  if ! awk '/# Video/{flag=1} flag && /http/' readme.md; then
+                      echo "Warning during build! Missing link to video in readme.md" |& tee -a ./dist/_build_log.txt |& tee "./dist/_WARNINGS.txt"
+                  fi
+
+                  : # Raise a warning if there is no file in the docs/ folder besides instructions.md, index.md, and dashboard.md
+                  printf 'Current docs/ folder contents:\n' |& tee -a ./dist/_build_log.txt
+                  ls docs/ | tee -a ./dist/_build_log.txt
+                  if [ $(ls docs/ | wc -l) -le 3 ]; then
+                      printf 'Warning during build! There were fewer files in the docs/ folder than expected; did you upload your planning document?' |& tee -a ./dist/_build_log.txt |& tee "./dist/_WARNINGS.txt"
+                  else
+                      : # ... And then a separate warning if NONE of the files get referenced in the readme.md
+                      # Directory and file paths
+                      docs_dir="docs/"
+                      readme_file="readme.md"
+                      excluded_file="instructions.md"
+
+                      # Find all files in the docs/ directory excluding instructions.md
+                      files_in_docs=$(find "$docs_dir" -type f ! -name "$excluded_file" -exec basename {} \;)
+
+                      # Flag to check if any files are found
+                      found=0
+
+                      # Loop through the files in docs/ and check if they are referenced in readme.md
+                      for file in $files_in_docs; do
+                          if grep -q "$file" "$readme_file"; then
+                              echo "Docs file '$file' is referenced in $readme_file (assuming this is the planning document)" |& tee -a ./dist/_build_log.txt
+                              found=1
+                          fi
+                      done
+
+                      # If no other files are found, print a message
+                      if [[ $found -eq 0 ]]; then
+                          printf 'Warning during build! No files in the docs/ folder are referenced in the readme.md. Did you upload your planning document and link it correctly?' |& tee -a ./dist/_build_log.txt |& tee "./dist/_WARNINGS.txt"
+                      fi
+                  fi
+            # Sanity checks
+            - name: Structural Checks for Build Files
+              id: structural_checks
+              run: |
+                  : # Make sure that they have all the requisite folders
+                  if [ ! -d website ]; then
+                      echo "Missing website folder with main.py file" |& tee -a ./dist/_build_log.txt |& tee "./dist/_ERRORS.txt"
+                      exit 1
+                  fi
+                  : # Make sure that there is a main.py file
+                  if [ ! -f website/main.py ]; then
+                      echo "Missing main.py file in the website/ folder" |& tee -a ./dist/_build_log.txt |& tee "./dist/_ERRORS.txt"
+                      exit 1
+                  fi
+                  : # Make sure that they updated the main.py file with their version, based on the md5sum: c6cdb475fd65d116483482315dc9b8ef
+                  if [ "$(md5sum website/main.py | cut -d' ' -f1)" == "c6cdb475fd65d116483482315dc9b8ef" ]; then
+                      echo "Error during build! You need to update the website/main.py file with your own code" |& tee -a ./dist/_build_log.txt |& tee "./dist/_ERRORS.txt"
+                      exit 1
+                  fi
+                  : # Make sure the tools folder is present with the files: 404.html, build.py, index.html
+                  if [ ! -d tools ]; then
+                      echo "Missing tools folder with 404.html, build.py, index.html files" |& tee -a ./dist/_build_log.txt |& tee "./dist/_ERRORS.txt"
+                      exit 1
+                  fi
+                  for file in 404.html build.py index.html; do
+                      if [ ! -f tools/$file ]; then
+                          echo "Missing $file file in the tools/ folder" |& tee -a ./dist/_build_log.txt |& tee "./dist/_ERRORS.txt"
+                          exit 1
+                      fi
+                  done
+
+                  printf 'Successfully passed structural checks\n' >> ./dist/_build_log.txt
+            # Compile their site into JS
+            - name: Compile Site 
+              id: compile_site
+              run: |
+                  echo "<html><body><pre>" > ./dist/compile.html
+                  : # Copy over all the students' files in the website directory
+                  cp -r website/ dist/
+                  : # Create a JS file to hold all their code
+                  python tools/build.py 2> >(tee ./dist/_ERRORS.txt) |& tee -a ./dist/compile.html ./dist/_build_log.txt
+                  cp tools/build/website_files.js dist/
+                  : # Copy over the index and 404 HTML pages
+                  cp tools/index.html dist/index.html
+                  cp tools/404.html dist/404.html
+
+                  echo "</pre></body></html>" >> ./dist/compile.html
+                  echo "* [Compile Files](../compile.html): Compilation details from when we bundled up your website. You probably don't need to worry about this, unless there was an error during deployment." >> docs/dashboard.md
+
+                  printf 'Successfully compiled site into JS\n' >> ./dist/_build_log.txt
+            - name: Install dependencies
+              id: dependencies
+              run: |
+                  echo "<html><body><pre>" > ./dist/installation.html
+                  python -m pip install coverage drafter bakery pylint mypy matplotlib pillow coverage pymarkdownlnt vulture 2> >(tee ./dist/_ERRORS.txt) |& tee -a ./dist/installation.html
+                  : # Install students' requirements.txt file if it is present
+                  if [ -f website/requirements.txt ]; then
+                      python -m pip install -r website/requirements.txt 2> >(tee ./dist/_ERRORS.txt) |& tee -a ./dist/installation.html
+                  fi
+                  echo "</pre></body></html>" >> ./dist/installation.html
+                  echo '* [Installation](../installation.html): Installation details from when we deployed your website, and we installed required python packages. If you had a custom `requirements.txt` file, then this will have some useful details.' >> docs/dashboard.md
+
+                  printf 'Successfully installed dependencies\n' >> ./dist/_build_log.txt
+            - name: Run tests and output code coverage
+              id: tests
+              run: |
+                  echo "<html><body><pre>" > ./dist/tests.html
+                  DRAFTER_SKIP=true coverage run website/main.py 2> >(tee ./dist/_ERRORS.txt) |& tee -a ./dist/_build_log.txt ./dist/tests.html
+                  coverage html -d ./dist/coverage 2> >(tee ./dist/_ERRORS.txt) |& tee -a ./dist/_build_log.txt ./dist/tests.html
+                  echo "</pre></body></html>" >> ./dist/tests.html
+                  echo '* [Raw Test Output](../tests.html): The results of running your test cases, if any.' >> docs/dashboard.md
+                  echo "* [Coverage Report](../coverage/index.html): The code coverage report from your tests (an HTML document showing the lines of code that were actually executed by your tests). More coverage is usually better, but full coverage does not mean that your application has no bugs!" >> docs/dashboard.md
+
+                  printf 'Successfully ran tests and output code coverage\n' >> ./dist/_build_log.txt
+            - name: Run linter
+              id: lint
+              continue-on-error: true
+              run: |
+                  echo "<html><body><pre>" > ./dist/lint.html
+                  pylint website/*.py --exit-zero 2> >(tee ./dist/_ERRORS.txt) |& tee -a ./dist/_build_log.txt ./dist/lint.html
+                  echo "</pre></body></html>" >> ./dist/lint.html
+                  echo '* [Lint](../lint.html): The results of running a *linter* (`PyLint`) on your code. A linter will report stylistic issues with your code. Improving them might make your code easier to read. Some of the linter suggestions will be outside the scope of this course, but it can be helpful to look at what a professional tool suggests.' >> docs/dashboard.md
+
+                  printf 'Successfully ran linter\n' >> ./dist/_build_log.txt
+            - name: Run type checker
+              id: typecheck
+              continue-on-error: true
+              run: |
+                  echo "<html><body><pre>" > ./dist/type.html
+                  : # If there is no mypy.ini file, then create one with default settings to ignore Bakery
+                  if [ ! -f mypy.ini ]; then
+                      echo '[mypy]' > mypy.ini
+                      echo '[mypy-bakery.*]' >> mypy.ini
+                      echo 'ignore_missing_imports = True' >> mypy.ini
+                  fi
+                  : # Not yet comfortable with mypy, so running it in a continue-on-error mode and not failing the build
+                  mypy website/main.py |& tee -a ./dist/_build_log.txt ./dist/type.html
+                  echo "</pre></body></html>" >> ./dist/type.html
+                  echo '* [Type](../type.html): The results of running a *typechecker* (`MyPy`) on your code. This is a sophisticated piece of software that can identify type issues. However, you should take it with a grain of salt, since it may raise issues that are outside of the scope of this course. ' >> docs/dashboard.md
+
+                  printf 'Successfully ran type checker\n' >> ./dist/_build_log.txt
+            - name: Create Vulture report
+              id: vulture
+              continue-on-error: true
+              run: |
+                  echo "<html><body><pre>" > ./dist/vulture.html
+                  : # Not yet comfortable with mypy, so running it in a continue-on-error mode and not failing the build
+                  python -m vulture website/main.py --ignore-decorators @route |& tee -a ./dist/_build_log.txt ./dist/vulture.html
+                  echo "</pre></body></html>" >> ./dist/vulture.html
+                  echo '* [Vulture](../vulture.html): The results of running Vulture on your code. This looks for variables, functions, and class fields that might be unused after being declared. Take it with a grain of salt and look over the code yourself before you trust what it says! ' >> docs/dashboard.md
+
+                  printf 'Successfully ran Vulture\n' >> ./dist/_build_log.txt
+            - name: Create integrity report
+              if: ${{ !cancelled() }}
+              id: integrity
+              run: |
+                  echo "<html><body><p>These are the current MD5 Hashsums for the build files. We can check these to ensure that you haven't broken any core build files. You probably don't need to worry about this.</p><pre>" > ./dist/integrity.html
+                  echo "MD5 Hashsums for the build files:" >> ./dist/_build_log.txt
+                  md5sum readme.md | tee -a ./dist/integrity.html ./dist/_build_log.txt
+                  md5sum tools/404.html | tee -a ./dist/integrity.html ./dist/_build_log.txt
+                  md5sum tools/index.html | tee -a ./dist/integrity.html ./dist/_build_log.txt
+                  md5sum .github/workflows/deploy.yml | tee -a ./dist/integrity.html ./dist/_build_log.txt
+                  echo "</pre></body></html>" >> ./dist/integrity.html
+                  echo '* [File Integrity Checks](../integrity.html): The MD5 Hashsums for some of the build files used during deployment. If changes were made to these files, then the values will be different than expected. This is only useful information for your instructor to look at when debugging issues with your deployment.' >> docs/dashboard.md
+
+                  printf 'Successfully created integrity report\n' >> ./dist/_build_log.txt
+            - name: Create GitInspector Report
+              if: ${{ !cancelled() }}
+              id: gitinspector
+              run: |
+                  git clone https://github.com/jpwhite3/gitinspector.git
+                  python ./gitinspector/gitinspector.py ./ --grading --format=html -f tsx,ts,html,css,py,md -x ./gitinspector -x ./tools/ > ./dist/git.html
+                  echo '* [Git Inspector Report](../git.html): A record of the commits and work done by all the contributors to this repository. This can help demonstrate that you did the work when you said you did.' >> docs/dashboard.md
+
+                  printf 'Successfully created GitInspector report\n' >> ./dist/_build_log.txt
+            - name: Copy commit logs with messages
+              if: ${{ !cancelled() }}
+              id: commit_logs
+              run: |
+                  echo "<html><body><pre>" > ./dist/commits.html
+                  echo "Last 50 commits with messages:" >> ./dist/_build_log.txt
+                  git log --oneline --decorate --graph --all -n 50 | tee -a ./dist/commits.html ./dist/_build_log.txt
+                  echo "</pre></body></html>" >> ./dist/commits.html
+                  echo '* [Commit Messages](../commits.html): The last 50 commit messages logged for this repository. Make sure you are writing good commit messages!' >> docs/dashboard.md
+
+                  printf 'Successfully copied commit logs with messages\n' >> ./dist/_build_log.txt
+            # Lint the docs/index.md file with pymarkdownlnt
+            - name: Lint docs/index.md file
+              if: ${{ !cancelled() }}
+              id: lint_docs
+              continue-on-error: true
+              run: |
+                  echo "<html><body><pre>" > ./dist/docs_lint.html
+                  pymarkdownlnt --return-code-scheme minimal scan docs/index.md |& tee -a ./dist/_build_log.txt ./dist/docs_lint.html
+                  echo "</pre></body></html>" >> ./dist/docs_lint.html
+                  echo '* [Docs Lint](../docs_lint.html): The results of running a Markdown linter (`pymarkdownlnt`) on your `readme.md` file. This will identify potential issues with the formatting and style of your Markdown file. Some of the issues that it raises may be trivial or outside the scope of this course, but it can still be helpful to review what it suggests.' >> docs/dashboard.md
+
+                  printf 'Successfully linted the docs/index.md file\n' >> ./dist/_build_log.txt
+            # If there were errors or warnings, then prepend them to the dashboard
+            - name: Show errors and warnings in dashboard
+              id: show_errors_warnings
+              if : ${{ !cancelled() }}
+              run: |
+                  : # If the ./dist/_ERRORS.txt file is not empty, then prepend it to the dashboard
+                  if [ -s ./dist/_ERRORS.txt ]; then
+                      touch ./dist/_ERRORS_HEADER.md
+                      printf '# Dashboard\n\n## Error During Build!\n\n!!! failure\n    There was an error during your build. Details are below:\n\n```\n' > ./dist/_ERRORS_HEADER.md
+                      printf '\n```\n' >> ./dist/_ERRORS.txt
+                      cat ./dist/_ERRORS_HEADER.md ./dist/_ERRORS.txt ./docs/dashboard.md > ./dist/tmp.md
+                      mv ./dist/tmp.md ./docs/dashboard.md
+                      printf 'Errors found during build. They were prepended to dashboard.\n' >> ./dist/_build_log.txt
+                  else
+                    : # If the ./dist/_WARNINGS.txt file is not empty, then prepend it to the dashboard
+                    if [ -s ./dist/_WARNINGS.txt ]; then
+                        touch ./dist/_WARNINGS_HEADER.md
+                        printf '# Dashboard\n\n## Warning During Build!\n\n!!! warning\n    There was one or more warnings during your build. Details are below:\n\n```\n' > ./dist/_WARNINGS_HEADER.md
+                        printf '\n```\n' >> ./dist/_WARNINGS.txt
+                        cat ./dist/_WARNINGS_HEADER.md ./dist/_WARNINGS.txt ./docs/dashboard.md > ./dist/tmp.md
+                        mv ./dist/tmp.md ./docs/dashboard.md
+                        printf 'Warnings found during build. They were prepended to dashboard.\n' >> ./dist/_build_log.txt
+                    else
+                        : # Need to prepend '# Dashboard' to the dashboard file if there are no errors or warnings
+                        printf '# Dashboard\n' > ./dist/tmp.md
+                        cat ./dist/tmp.md ./docs/dashboard.md > ./dist/tmp2.md
+                        mv ./dist/tmp2.md ./docs/dashboard.md
+                        printf 'No major errors or warnings found during build.\n' >> ./dist/_build_log.txt
+                    fi
+                  fi
+            - name: Add build log at the end of the dashboard
+              id: add_build_log
+              if: ${{ !cancelled() }}
+              run: |
+                  printf '\n## Build Log\n' >> ./docs/dashboard.md
+                  printf '\n```\n' >> ./docs/dashboard.md
+                  cat ./dist/_build_log.txt >> ./docs/dashboard.md
+                  printf '\n```\n' >> ./docs/dashboard.md
+                  printf 'Build log added to dashboard. Preparing to generate final HTML and deploy!' >> ./docs/dashboard.md
+            # Regardless of anything else, generate the HTML from the Markdown files
+            - name: Generate HTML from Markdown in Docs/
+              if: ${{ !cancelled() }}
+              id: markdown-docs
+              uses: ldeluigi/markdown-docs@latest
+              with:
+                  src: docs
+                  dst: dist/docs/
+            # Finish deployment by uploading artifacts
+            - name: Setup Pages
+              uses: actions/configure-pages@v3
+              if: ${{ !cancelled() }}
+            - name: Upload artifact
+              uses: actions/upload-pages-artifact@v2
+              if: ${{ !cancelled() }}
+              with:
+                  # Upload entire repository
+                  path: "dist/"
+            - name: Deploy to GitHub Pages
+              id: deployment
+              uses: actions/deploy-pages@v2
+              if: ${{ !cancelled() }}
